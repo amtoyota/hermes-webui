@@ -640,7 +640,9 @@ window._micPendingSend=window._micPendingSend||false;
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
   const hasSTT=!(!SpeechRecognition);
-  const hasTTS=!!('speechSynthesis' in window);
+
+  // TTS via Hermes backend API — always available, no browser speechSynthesis needed
+  const hasTTS=true;
 
   // Need both STT and TTS for turn-based voice mode
   if(!hasSTT||!hasTTS) return;
@@ -664,6 +666,52 @@ window._micPendingSend=window._micPendingSend||false;
     catch(_){ return false; }
   }
   let _voiceModeActive=false;
+
+  // ── Hermes TTS via backend API ───────────────────────────────────────────
+  // Global flag so _speakResponse can poll for completion
+  window._ttsSpeaking=false;
+
+  window._hermesSpeak=function(text, voice, rate){
+    window._ttsSpeaking=true;
+    const csrfToken=window._csrfToken||'';
+    const headers={'Content-Type':'application/json'};
+    if(csrfToken) headers['X-CSRF-Token']=csrfToken;
+
+    fetch('/api/tts',{
+      method:'POST',
+      headers:headers,
+      body:JSON.stringify({
+        text:text,
+        voice:voice||'en-GB-RyanNeural',
+        rate:rate||1.0
+      })
+    })
+    .then(r=>{
+      if(!r.ok) throw new Error('TTS request failed');
+      return r.blob();
+    })
+    .then(blob=>{
+      const url=URL.createObjectURL(blob);
+      const audio=new Audio(url);
+      audio.onended=()=>{
+        URL.revokeObjectURL(url);
+        window._ttsSpeaking=false;
+      };
+      audio.onerror=()=>{
+        URL.revokeObjectURL(url);
+        window._ttsSpeaking=false;
+      };
+      audio.play().catch(e=>{
+        console.error('TTS playback error:',e);
+        window._ttsSpeaking=false;
+      });
+    })
+    .catch(e=>{
+      console.error('TTS fetch error:',e);
+      window._ttsSpeaking=false;
+    });
+  };
+  // ── End Hermes TTS ───────────────────────────────────────────────────────
 
   function _applyVoiceModePref(){
     const enabled = _voiceModePrefEnabled();
@@ -821,29 +869,25 @@ window._micPendingSend=window._micPendingSend||false;
     }
     if(!clean){ _startListening(); return; }
 
-    const utter=new SpeechSynthesisUtterance(clean);
-
-    // Apply saved voice preferences
-    const savedVoice=localStorage.getItem('hermes-tts-voice');
-    const voices=speechSynthesis.getVoices();
-    if(savedVoice&&voices.length){
-      const match=voices.find(v=>v.name===savedVoice);
-      if(match) utter.voice=match;
-    }
-    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-    if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
-    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-    if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
-    utter.onend=()=>{
-      // After speaking, go back to listening
+    _setState('speaking');
+    // Use Hermes TTS via the global speak function
+    if(typeof _hermesSpeak==='function'){
+      _hermesSpeak(clean,
+        localStorage.getItem('hermes-tts-voice') || 'en-GB-RyanNeural',
+        parseFloat(localStorage.getItem('hermes-tts-rate')) || 1.0
+      );
+      // Poll for completion — _hermesSpeak doesn't have a callback,
+      // so we check when _ttsSpeaking goes false
+      const _pollTTS=setInterval(()=>{
+        if(!_ttsSpeaking){
+          clearInterval(_pollTTS);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+        }
+      },200);
+    } else {
+      // Fallback: just go back to listening
       if(_voiceModeActive) setTimeout(()=>_startListening(),500);
-    };
-    utter.onerror=()=>{
-      if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
-    };
-
-    speechSynthesis.speak(utter);
+    }
   }
 
   // Hook into response completion — observe when the agent finishes

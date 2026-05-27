@@ -4203,13 +4203,62 @@ function _stripForTTS(text){
 }
 
 let _ttsSpeaking=false;
-let _ttsCurrentUtterance=null;
+let _ttsCurrentAudio=null;
+
+function _hermesSpeak(text, voice, rate){
+  // Stop any current playback
+  if(_ttsCurrentAudio){
+    _ttsCurrentAudio.pause();
+    _ttsCurrentAudio=null;
+  }
+  _ttsSpeaking=true;
+
+  // Build the fetch URL with parameters
+  const params=new URLSearchParams();
+  // Send as POST with JSON body for long text support
+  fetch('/api/tts', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      text: text,
+      voice: voice || localStorage.getItem('hermes-tts-voice') || 'en-GB-RyanNeural',
+      rate: parseFloat(localStorage.getItem('hermes-tts-rate')) || 1.0
+    })
+  })
+  .then(resp=>{
+    if(!resp.ok) throw new Error('TTS failed: '+resp.status);
+    return resp.blob();
+  })
+  .then(blob=>{
+    const url=URL.createObjectURL(blob);
+    const audio=new Audio(url);
+    _ttsCurrentAudio=audio;
+    audio.onended=()=>{
+      _ttsSpeaking=false;
+      URL.revokeObjectURL(url);
+      _ttsCurrentAudio=null;
+      document.querySelectorAll('[data-speaking="1"]').forEach(b=>{ b.dataset.speaking='0'; });
+    };
+    audio.onerror=()=>{
+      _ttsSpeaking=false;
+      URL.revokeObjectURL(url);
+      _ttsCurrentAudio=null;
+      document.querySelectorAll('[data-speaking="1"]').forEach(b=>{ b.dataset.speaking='0'; });
+    };
+    audio.play().catch(()=>{
+      _ttsSpeaking=false;
+      _ttsCurrentAudio=null;
+      document.querySelectorAll('[data-speaking="1"]').forEach(b=>{ b.dataset.speaking='0'; });
+    });
+  })
+  .catch(err=>{
+    _ttsSpeaking=false;
+    console.error('Hermes TTS error:', err);
+    document.querySelectorAll('[data-speaking="1"]').forEach(b=>{ b.dataset.speaking='0'; });
+  });
+}
 
 function speakMessage(btn){
-  if(!('speechSynthesis' in window)){
-    showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
-    return;
-  }
   // If already speaking this message, stop
   if(btn&&btn.dataset.speaking==='1'){
     stopTTS();
@@ -4225,68 +4274,42 @@ function speakMessage(btn){
   const clean=_stripForTTS(text);
   if(!clean) return;
 
-  const utter=new SpeechSynthesisUtterance(clean);
-
-  // Apply saved voice preference
-  const savedVoice=localStorage.getItem('hermes-tts-voice');
-  const voices=speechSynthesis.getVoices();
-  if(savedVoice&&voices.length){
-    const match=voices.find(v=>v.name===savedVoice);
-    if(match) utter.voice=match;
-  }
-
-  // Apply saved rate/pitch
-  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-  if(!isNaN(savedRate)) utter.rate= Math.min(2,Math.max(0.5,savedRate));
-  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
-  _ttsCurrentUtterance=utter;
-  _ttsSpeaking=true;
   if(btn) btn.dataset.speaking='1';
-
-  utter.onend=()=>{ _ttsSpeaking=false; _ttsCurrentUtterance=null; if(btn) btn.dataset.speaking='0'; };
-  utter.onerror=()=>{ _ttsSpeaking=false; _ttsCurrentUtterance=null; if(btn) btn.dataset.speaking='0'; };
-
-  speechSynthesis.speak(utter);
+  _hermesSpeak(clean,
+    localStorage.getItem('hermes-tts-voice') || 'en-GB-RyanNeural',
+    parseFloat(localStorage.getItem('hermes-tts-rate')) || 1.0
+  );
 }
 
 function stopTTS(){
-  if('speechSynthesis' in window){
-    speechSynthesis.cancel();
+  if(_ttsCurrentAudio){
+    _ttsCurrentAudio.pause();
+    _ttsCurrentAudio=null;
   }
   _ttsSpeaking=false;
-  _ttsCurrentUtterance=null;
   // Reset all speaking buttons
   document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; });
 }
 
 function autoReadLastAssistant(){
-  if(!('speechSynthesis' in window)) return;
   const pref=localStorage.getItem('hermes-tts-auto-read');
   if(pref!=='true') return;
+  // Check min length threshold
+  const minLen=parseInt(localStorage.getItem('hermes-tts-min-length'))||150;
   // Find the last assistant message segment in the DOM
   const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
   if(!rows.length) return;
   const last=rows[rows.length-1];
   const text=last.dataset.rawText||'';
   if(!text.trim()) return;
+  if(text.length<minLen) return;  // Skip short responses
   const clean=_stripForTTS(text);
   if(!clean) return;
 
-  const utter=new SpeechSynthesisUtterance(clean);
-  const savedVoice=localStorage.getItem('hermes-tts-voice');
-  const voices=speechSynthesis.getVoices();
-  if(savedVoice&&voices.length){
-    const match=voices.find(v=>v.name===savedVoice);
-    if(match) utter.voice=match;
-  }
-  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-  if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
-  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
-  speechSynthesis.speak(utter);
+  _hermesSpeak(clean,
+    localStorage.getItem('hermes-tts-voice') || 'en-GB-RyanNeural',
+    parseFloat(localStorage.getItem('hermes-tts-rate')) || 1.0
+  );
 }
 
 // ── Reconnect banner (B4/B5: reload resilience) ──

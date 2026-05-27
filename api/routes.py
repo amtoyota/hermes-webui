@@ -4954,6 +4954,9 @@ def handle_get(handler, parsed) -> bool:
             logger.exception("rollback/diff failed")
             return bad(handler, str(e), status=500)
 
+    if parsed.path == "/api/tts/voices":
+        return handle_tts_list_voices(handler, parsed)
+
     return False  # 404
 
 
@@ -4993,6 +4996,17 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
+
+    if parsed.path == "/api/tts":
+        if diag:
+            diag.stage("read_body")
+        try:
+            body = read_body(handler)
+        except Exception:
+            if diag:
+                diag.finish()
+            raise
+        return handle_tts_speak(handler, parsed, body)
 
     if parsed.path == "/api/client-events/log":
         if diag:
@@ -6688,6 +6702,45 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except Exception as e:
             logger.exception("rollback/restore failed")
+            return bad(handler, str(e), status=500)
+
+    # ── Hermes TTS (POST) ──
+    if parsed.path == "/api/tts":
+        text = body.get("text", "")
+        voice = body.get("voice", "en-GB-RyanNeural")
+        rate_float = float(body.get("rate", 1.0))
+        if not text:
+            return bad(handler, "text is required")
+        if len(text) > 10000:
+            return bad(handler, "text too long (max 10000 chars)", status=413)
+        try:
+            import asyncio
+            import edge_tts
+
+            # Convert 0.5-2.0 slider value to edge_tts percentage string
+            rate_pct = max(-90, min(100, int((rate_float - 1.0) * 100)))
+            rate_str = f"{rate_pct:+d}%"
+
+            async def _generate():
+                communicate = edge_tts.Communicate(
+                    text, voice=voice, rate=rate_str
+                )
+                audio = b""
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        audio += chunk["data"]
+                return audio
+
+            audio_bytes = asyncio.run(_generate())
+            handler.send_response(200)
+            handler.send_header("Content-Type", "audio/mpeg")
+            handler.send_header("Content-Length", str(len(audio_bytes)))
+            handler.send_header("Cache-Control", "no-store")
+            handler.end_headers()
+            handler.wfile.write(audio_bytes)
+            return True
+        except Exception as e:
+            logger.exception("TTS generation failed")
             return bad(handler, str(e), status=500)
 
     return False  # 404
@@ -13032,3 +13085,83 @@ def _handle_mcp_server_update(handler, name, body):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+
+# ── TTS (Text-to-Speech) ──────────────────────────────────────────────────────
+
+def _get_tts_voices():
+    """Return a list of available Edge TTS voices with name and locale."""
+    try:
+        import asyncio
+        import edge_tts
+        voices = asyncio.run(edge_tts.list_voices())
+        return [
+            {"name": v["ShortName"], "friendly": f"{v['ShortName']} — {v['Locale']} ({v['Gender']})", "locale": v["Locale"], "gender": v["Gender"]}
+            for v in voices
+        ]
+    except Exception as exc:
+        logger.warning("Failed to list Edge TTS voices: %s", exc)
+        return []
+
+
+def handle_tts_list_voices(handler, parsed) -> bool:
+    """GET /api/tts/voices — list available Edge TTS voices."""
+    return j(handler, {"voices": _get_tts_voices()})
+
+
+def handle_tts_speak(handler, parsed, body) -> bool:
+    """POST /api/tts — generate speech from text using edge_tts, stream MP3.
+
+    Request body (JSON):
+        text (required): Text to speak
+        voice (optional): Edge TTS voice name (default: en-GB-RyanNeural)
+        rate (optional): Speaking rate (default: 1.0)
+
+    Returns audio/mpeg stream — no file written to disk.
+    """
+    text = (body or {}).get("text", "").strip()
+    if not text:
+        return bad(handler, "text is required")
+
+    voice = (body or {}).get("voice", "en-GB-RyanNeural") or "en-GB-RyanNeural"
+    rate = (body or {}).get("rate", "+0%")
+
+    # Accept both string ("+10%") and numeric (1.1) rate formats
+    if isinstance(rate, (int, float)):
+        # Convert numeric rate: 1.0 → "+0%", 1.2 → "+20%", 0.8 → "-20%"
+        pct = int((rate - 1.0) * 100)
+        rate = f"{pct:+d}%"
+    elif isinstance(rate, str) and rate.lstrip("-+").rstrip("%").isdigit():
+        pass  # already in "+X%" or "-X%" format
+    else:
+        rate = "+0%"
+
+    try:
+        import edge_tts
+        import io
+
+        communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
+        mp3_buffer = io.BytesIO()
+
+        async def _generate():
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    mp3_buffer.write(chunk["data"])
+
+        import asyncio
+        asyncio.run(_generate())
+
+        mp3_data = mp3_buffer.getvalue()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Content-Length", str(len(mp3_data)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        handler.wfile.write(mp3_data)
+        return True
+
+    except ImportError:
+        return bad(handler, "edge_tts is not available")
+    except Exception as exc:
+        logger.exception("TTS generation failed")
+        return bad(handler, f"TTS failed: {exc}")

@@ -6165,7 +6165,19 @@ async function loadSettingsPanel(){
     const ttsEnabledCb=$('settingsTtsEnabled');
     if(ttsEnabledCb){ttsEnabledCb.checked=localStorage.getItem('hermes-tts-enabled')==='true';ttsEnabledCb.onchange=function(){localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);};}
     const ttsAutoReadCb=$('settingsTtsAutoRead');
-    if(ttsAutoReadCb){ttsAutoReadCb.checked=localStorage.getItem('hermes-tts-auto-read')==='true';ttsAutoReadCb.onchange=function(){localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');};}
+    if(ttsAutoReadCb){ttsAutoReadCb.checked=localStorage.getItem('hermes-tts-auto-read')==='true';ttsAutoReadCb.onchange=function(){localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');const f=$('settingsTtsMinLenField');if(f)f.style.display=this.checked?'':'none';};}
+    // Show/hide min-length field on load based on auto-read state
+    const ttsMinLenField=$('settingsTtsMinLenField');
+    if(ttsMinLenField) ttsMinLenField.style.display=(localStorage.getItem('hermes-tts-auto-read')==='true')?'':'none';
+    // Min length threshold slider
+    const ttsMinLenSlider=$('settingsTtsMinLength');
+    const ttsMinLenValue=$('settingsTtsMinLengthValue');
+    if(ttsMinLenSlider){
+      const saved=localStorage.getItem('hermes-tts-min-length');
+      ttsMinLenSlider.value=saved||'150';
+      if(ttsMinLenValue) ttsMinLenValue.textContent=ttsMinLenSlider.value;
+      ttsMinLenSlider.oninput=function(){if(ttsMinLenValue)ttsMinLenValue.textContent=this.value;localStorage.setItem('hermes-tts-min-length',this.value);};
+    }
     // Voice-mode button visibility (#1488). localStorage-only; no server round-trip.
     // Toggling re-applies immediately via the boot.js helper so the user sees
     // the audio-waveform button appear/disappear without a reload.
@@ -6177,22 +6189,11 @@ async function loadSettingsPanel(){
         if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
       };
     }
-    // Populate voice selector from speechSynthesis
+    // Hermes TTS voice selector (hardcoded Edge TTS options in the HTML)
     const ttsVoiceSel=$('settingsTtsVoice');
-    if(ttsVoiceSel&&'speechSynthesis' in window){
-      const populateVoices=()=>{
-        const voices=speechSynthesis.getVoices();
-        const current=localStorage.getItem('hermes-tts-voice')||'';
-        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
-        voices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
-          if(v.name===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
-        });
-      };
-      populateVoices();
-      speechSynthesis.addEventListener('voiceschanged',populateVoices,{once:true});
+    if(ttsVoiceSel){
+      const saved=localStorage.getItem('hermes-tts-voice')||'en-GB-RyanNeural';
+      if(ttsVoiceSel.querySelector('option[value="'+saved+'"]')) ttsVoiceSel.value=saved;
       ttsVoiceSel.onchange=function(){localStorage.setItem('hermes-tts-voice',this.value);};
     }
     // TTS rate/pitch sliders
